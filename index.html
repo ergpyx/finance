@@ -777,7 +777,7 @@ function migrateDB(data){
   data.accounts=(data.accounts||[]).map(a=>({...a,openingBalance:Number(a.openingBalance ?? a.balance ?? 0),bankBalance:Number(a.bankBalance ?? a.balance ?? 0),reconciled:Boolean(a.reconciled)}));
   data.transactions=(data.transactions||[]).map(t=>({...t,amount:Number(t.amount||0),accountId:t.accountId||accountIdFor(t.account,data.accounts),cleared:t.cleared!==false,splits:t.splits||null}));
   data.budgets=(data.budgets||[]).map(b=>({...b,limit:Number(b.limit||0),rollover:b.rollover!==false,rolloverAmount:Number(b.rolloverAmount||0),annual:Boolean(b.annual)}));
-  data.debts=(data.debts||[]).map(d=>({...d,principal:Number(d.principal||0),balance:Number(d.balance||0),rate:Number(d.rate||0),payment:Number(d.payment||0),term:Number(d.term||12),payments:Array.isArray(d.payments)?d.payments:[]}));
+  data.debts=(data.debts||[]).map(d=>({...d,principal:Number(d.principal||0),balance:Number(d.balance||0),rate:Number(d.rate||0),payment:Number(d.payment||0),paymentMode:d.paymentMode||(Number(d.payment||0)>0?"fixed":"flexible"),term:Number(d.term||12),payments:Array.isArray(d.payments)?d.payments:[]}));
   data.auditLog=Array.isArray(data.auditLog)?data.auditLog:[];
   return data;
 }
@@ -924,6 +924,7 @@ function toggleDebtInstallment(id,installment,checked){
   if(!debt||!account)return;
   const alreadyPaid=(debt.payments||[]).some(payment=>payment.installment===installment);
   if(alreadyPaid)return;
+  if(debt.paymentMode==="flexible"||Number(debt.payment||0)<=0){return;}
   const amount=Math.min(Number(debt.payment||0),Number(debt.balance||0)+(Number(debt.balance||0)*Number(debt.rate||0)/100/12));
   const interest=Math.min(amount,Number(debt.balance||0)*Number(debt.rate||0)/100/12);
   recordDebtPayment(debt,{amount,interest,date:new Date().toISOString().slice(0,10),accountId:account.id,installment});
@@ -932,7 +933,8 @@ function debtChecklist(debt){
   const term=Math.max(1,Number(debt.term)||12), payments=debt.payments||[];
   return Array.from({length:term},(_,index)=>{
     const installment=index+1, paid=payments.find(payment=>payment.installment===installment);
-    return `<label class="debt-check"><input type="checkbox" ${paid?"checked disabled":""} onchange="toggleDebtInstallment(${debt.id},${installment},this.checked)"><span>Cicilan ${installment}${paid?` · ${dateLabel(paid.date)}`:""}</span></label>`;
+    const action=debt.paymentMode==="flexible"?`this.checked=false;openModal('debtPayment',${debt.id},${installment})`:`toggleDebtInstallment(${debt.id},${installment},this.checked)`;
+    return `<label class="debt-check"><input type="checkbox" ${paid?"checked disabled":""} onchange="${paid?"":action}"><span>Cicilan ${installment}${paid?` · ${dateLabel(paid.date)}`:""}</span></label>`;
   }).join("");
 }
 function goalMetrics(g){
@@ -1249,7 +1251,7 @@ function renderDebts(){
   document.getElementById("debtTotal").textContent=money(total);
   document.getElementById("debtPayment").textContent=money(payment);
   document.getElementById("debtRate").textContent=rate.toFixed(2)+"%";
-  document.getElementById("debtTable").innerHTML=db.debts.length?`<table><thead><tr><th>Utang</th><th>Original</th><th>Outstanding</th><th>APR</th><th>Cicilan/bln</th><th>Progress</th><th></th></tr></thead><tbody>${db.debts.map(d=>{const p=Math.max(0,Math.min(100,pct(d.principal-d.balance,d.principal))); return `<tr><td><strong>${d.name}</strong></td><td>${money(d.principal)}</td><td class="negative"><strong>${money(d.balance)}</strong></td><td>${d.rate.toFixed(2)}%</td><td>${money(d.payment)}</td><td style="min-width:160px"><div class="progress"><span style="width:${p}%"></span></div><small>${p.toFixed(0)}% lunas</small></td><td><button class="btn btn-primary" style="padding:5px 8px" onclick="openModal('debtPayment',${d.id})">Bayar</button> <button class="btn" style="padding:5px 8px" onclick="openModal('debt',${d.id})">Edit</button> <button class="btn btn-danger" style="padding:5px 8px" onclick="deleteDebt(${d.id})">Hapus</button></td></tr>`}).join("")}</tbody></table>`:`<div class="empty">Tidak ada utang.</div>`;
+  document.getElementById("debtTable").innerHTML=db.debts.length?`<table><thead><tr><th>Utang</th><th>Original</th><th>Outstanding</th><th>APR</th><th>Cicilan/bln</th><th>Progress</th><th></th></tr></thead><tbody>${db.debts.map(d=>{const p=Math.max(0,Math.min(100,pct(d.principal-d.balance,d.principal))); return `<tr><td><strong>${d.name}</strong></td><td>${money(d.principal)}</td><td class="negative"><strong>${money(d.balance)}</strong></td><td>${d.rate.toFixed(2)}%</td><td>${d.paymentMode==="flexible"?"Bebas":money(d.payment)}</td><td style="min-width:160px"><div class="progress"><span style="width:${p}%"></span></div><small>${p.toFixed(0)}% lunas</small></td><td><button class="btn btn-primary" style="padding:5px 8px" onclick="openModal('debtPayment',${d.id})">Bayar</button> <button class="btn" style="padding:5px 8px" onclick="openModal('debt',${d.id})">Edit</button> <button class="btn btn-danger" style="padding:5px 8px" onclick="deleteDebt(${d.id})">Hapus</button></td></tr>`}).join("")}</tbody></table>`:`<div class="empty">Tidak ada utang.</div>`;
 }
 
 function renderGoals(){
@@ -1332,7 +1334,7 @@ function switchView(view){
   renderAll();
 }
 
-function openModal(type, id=null){
+function openModal(type, id=null, installment=null){
   const modal=document.getElementById("modal"), title=document.getElementById("modalTitle"), body=document.getElementById("modalBody");
   modal.classList.add("show");
   if(type==="transaction"){
@@ -1385,17 +1387,19 @@ function openModal(type, id=null){
       <label>Original principal<input name="principal" type="number" min="0" value="${existing?.principal||""}" required></label>
       <label>Outstanding balance<input name="balance" type="number" min="0" value="${existing?.balance??""}" required></label>
       <label>APR (%)<input name="rate" type="number" min="0" step="0.01" value="${existing?.rate??0}" required></label>
+      <label>Skema pembayaran<select name="paymentMode" onchange="toggleDebtPaymentMode(this.form)"><option value="fixed" ${(existing?.paymentMode||"fixed")==="fixed"?"selected":""}>Cicilan tetap</option><option value="flexible" ${existing?.paymentMode==="flexible"?"selected":""}>Bebas / manual</option></select></label>
       <label>Cicilan / bulan<input name="payment" type="number" min="0" value="${existing?.payment||""}" oninput="updateDebtTotal(this.form)" required></label>
       <label>Tenor (bulan)<input name="term" type="number" min="1" value="${existing?.term||12}" required></label>
       <label>Total rencana pembayaran<input name="plannedTotal" value="${money((existing?.payment||0)*(existing?.term||12))}" readonly></label>
     </div><div class="subtle">Total rencana dihitung otomatis dari cicilan bulanan × tenor.</div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">${existing?"Simpan perubahan":"Simpan"}</button></div></form>`;
+    toggleDebtPaymentMode(body.querySelector("form"));
     body.querySelector('[name="term"]').addEventListener("input",()=>updateDebtTotal(body.querySelector("form")));
   }
   if(type==="debtPayment"){
     const debt=db.debts.find(item=>item.id===id), accounts=(db.accounts||[]).map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
     if(!debt){ closeModal(); return; }
     title.textContent=`Bayar Utang: ${debt.name}`;
-    body.innerHTML=`<form onsubmit="submitDebtPayment(event,${id})"><div class="subtle" style="margin-bottom:12px">Outstanding saat ini: <strong>${money(debt.balance)}</strong></div><div class="input-grid">
+    body.innerHTML=`<form onsubmit="submitDebtPayment(event,${id},${installment||"null"})"><div class="subtle" style="margin-bottom:12px">Outstanding saat ini: <strong>${money(debt.balance)}</strong>${debt.paymentMode==="flexible"?" · Pembayaran manual":""}</div><div class="input-grid">
       <label>Tanggal<input name="date" type="date" value="${new Date().toISOString().slice(0,10)}" required></label>
       <label>Total pembayaran<input name="amount" type="number" min="1" required></label>
       <label>Bunga<input name="interest" type="number" min="0" value="0"></label>
@@ -1441,6 +1445,15 @@ function openModal(type, id=null){
   }
 }
 function closeModal(){ document.getElementById("modal").classList.remove("show"); }
+
+function toggleDebtPaymentMode(form){
+  const flexible=form.querySelector('[name="paymentMode"]')?.value==="flexible";
+  const payment=form.querySelector('[name="payment"]');
+  const term=form.querySelector('[name="term"]');
+  if(payment){payment.disabled=flexible;payment.required=!flexible;if(flexible)payment.value="";}
+  if(term)term.disabled=false;
+  updateDebtTotal(form);
+}
 
 function updateDebtTotal(form){
   const payment=Number(form.querySelector('[name="payment"]')?.value)||0;
@@ -1497,15 +1510,16 @@ function submitInvestment(e){
 function submitDebt(e){
   e.preventDefault(); const f=new FormData(e.target);
   const id=Number(e.target.dataset.debtId||0), existing=id?db.debts.find(item=>item.id===id):null;
-  const debt={id:id||Date.now(),name:f.get("name"),principal:Number(f.get("principal")),balance:Number(f.get("balance")),rate:Number(f.get("rate")),payment:Number(f.get("payment")),term:Number(f.get("term"))||12,payments:existing?.payments||[]};
+  const paymentMode=f.get("paymentMode")||"fixed";
+  const debt={id:id||Date.now(),name:f.get("name"),principal:Number(f.get("principal")),balance:Number(f.get("balance")),rate:Number(f.get("rate")),payment:paymentMode==="flexible"?0:Number(f.get("payment")),paymentMode,term:Number(f.get("term"))||12,payments:existing?.payments||[]};
   const before=existing?clone(existing):null;
   if(existing){Object.assign(existing,debt);}else db.debts.push(debt);
   closeModal(); commit(existing?"Edited debt":"Added debt","debt",before,debt,existing?"Utang berhasil diperbarui":"Utang berhasil ditambahkan");
 }
-function submitDebtPayment(e,id){
+function submitDebtPayment(e,id,installment=null){
   e.preventDefault(); const f=new FormData(e.target), debt=db.debts.find(item=>item.id===id);
   if(!debt)return;
-  const saved=recordDebtPayment(debt,{amount:Number(f.get("amount")),interest:Number(f.get("interest")||0),date:f.get("date"),accountId:Number(f.get("accountId"))});
+  const saved=recordDebtPayment(debt,{amount:Number(f.get("amount")),interest:Number(f.get("interest")||0),date:f.get("date"),accountId:Number(f.get("accountId")),installment});
   if(saved)closeModal();
 }
 function submitGoal(e){
