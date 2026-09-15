@@ -222,6 +222,9 @@
     .status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
     .status-good{background:var(--success)} .status-warn{background:var(--warning)} .status-bad{background:var(--danger)}
     .subtle{color:var(--muted);font-size:12px}
+    .debt-checklist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
+    .debt-check{display:flex;align-items:center;gap:7px;padding:9px 10px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;color:var(--text);font-weight:700}
+    .debt-check input{width:auto;margin:0}
     @media(max-width:1250px){.account-grid,.recurring-grid,.fire-grid{grid-template-columns:1fr}.health-grid{grid-template-columns:repeat(2,1fr)}}
     .mobile-menu{display:none}
     .radio-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}
@@ -248,6 +251,7 @@
       .hero{align-items:flex-start;flex-direction:column}
       .kpi-grid{grid-template-columns:repeat(2,1fr)}
       .two-col,.three-col,.allocation{grid-template-columns:1fr}
+      .debt-checklist{grid-template-columns:repeat(2,minmax(0,1fr))}
       .allocation{justify-items:center}
     }
     @media(max-width:580px){
@@ -773,6 +777,7 @@ function migrateDB(data){
   data.accounts=(data.accounts||[]).map(a=>({...a,openingBalance:Number(a.openingBalance ?? a.balance ?? 0),bankBalance:Number(a.bankBalance ?? a.balance ?? 0),reconciled:Boolean(a.reconciled)}));
   data.transactions=(data.transactions||[]).map(t=>({...t,amount:Number(t.amount||0),accountId:t.accountId||accountIdFor(t.account,data.accounts),cleared:t.cleared!==false,splits:t.splits||null}));
   data.budgets=(data.budgets||[]).map(b=>({...b,limit:Number(b.limit||0),rollover:b.rollover!==false,rolloverAmount:Number(b.rolloverAmount||0),annual:Boolean(b.annual)}));
+  data.debts=(data.debts||[]).map(d=>({...d,principal:Number(d.principal||0),balance:Number(d.balance||0),rate:Number(d.rate||0),payment:Number(d.payment||0),term:Number(d.term||12),payments:Array.isArray(d.payments)?d.payments:[]}));
   data.auditLog=Array.isArray(data.auditLog)?data.auditLog:[];
   return data;
 }
@@ -894,6 +899,41 @@ function amortizationSchedule(debt,months=6){
   for(let month=1;month<=months&&balance>.01;month++){const interest=balance*rate,principal=Math.min(balance,Math.max(0,Number(debt.payment||0)-interest));balance-=principal;rows.push({month,interest,principal,balance});}
   return rows;
 }
+function debtPaid(debt){ return sum(debt.payments||[],payment=>payment.principal); }
+function debtProgress(debt){
+  const principal=Number(debt.principal||0), balance=Number(debt.balance||0);
+  return Math.max(0,Math.min(100,pct(principal-balance,principal)));
+}
+function recordDebtPayment(debt,{amount,interest=0,date,accountId,installment=null}){
+  const total=Number(amount||0), monthlyInterest=Math.max(0,Number(interest||0)), principal=Math.max(0,total-monthlyInterest);
+  if(!total||principal<=0||principal>Number(debt.balance||0)){
+    alert("Nominal pembayaran tidak valid untuk outstanding utang ini.");
+    return false;
+  }
+  const before=clone(debt);
+  debt.balance=Math.max(0,Number(debt.balance)-principal);
+  debt.payments=(debt.payments||[]).concat({id:Date.now(),date:date||new Date().toISOString().slice(0,10),amount:total,principal,interest:monthlyInterest,installment});
+  db.transactions.push({id:Date.now()+1,date:date||new Date().toISOString().slice(0,10),type:"expense",category:"Debt Payment",description:`Pembayaran ${debt.name}`,amount:total,accountId:Number(accountId),account:accountById(accountId)?.name||"Account",cleared:true,debtId:debt.id,debtPrincipal:principal,debtInterest:monthlyInterest});
+  commit("Recorded debt payment","debt",before,debt,`Pembayaran ${debt.name} berhasil dicatat`);
+  return true;
+}
+function toggleDebtInstallment(id,installment,checked){
+  if(!checked)return;
+  const debt=db.debts.find(item=>item.id===id), account=db.accounts?.[0];
+  if(!debt||!account)return;
+  const alreadyPaid=(debt.payments||[]).some(payment=>payment.installment===installment);
+  if(alreadyPaid)return;
+  const amount=Math.min(Number(debt.payment||0),Number(debt.balance||0)+(Number(debt.balance||0)*Number(debt.rate||0)/100/12));
+  const interest=Math.min(amount,Number(debt.balance||0)*Number(debt.rate||0)/100/12);
+  recordDebtPayment(debt,{amount,interest,date:new Date().toISOString().slice(0,10),accountId:account.id,installment});
+}
+function debtChecklist(debt){
+  const term=Math.max(1,Number(debt.term)||12), payments=debt.payments||[];
+  return Array.from({length:term},(_,index)=>{
+    const installment=index+1, paid=payments.find(payment=>payment.installment===installment);
+    return `<label class="debt-check"><input type="checkbox" ${paid?"checked disabled":""} onchange="toggleDebtInstallment(${debt.id},${installment},this.checked)"><span>Cicilan ${installment}${paid?` · ${dateLabel(paid.date)}`:""}</span></label>`;
+  }).join("");
+}
 function goalMetrics(g){
   const months=Math.max(1,Math.ceil((new Date(g.date)-new Date())/(1000*60*60*24*30.4375))), required=Math.max(0,(g.target-g.saved)/months), current=Number(g.contribution||0), probability=Math.max(0,Math.min(99,100-(required>0?Math.max(0,(required-current)/required)*100:0)));
   return {months,required,current,probability,shortfall:Math.max(0,required-current)};
@@ -985,7 +1025,7 @@ function renderAdvancedPanels(){
   document.getElementById("portfolioAnalytics").innerHTML=`<div class="metric-grid"><div class="metric"><div class="m-label">Total return</div><div class="m-val ${p.totalReturn>=0?"positive":"negative"}">${money(p.totalReturn)} (${pct(p.totalReturn,p.cost).toFixed(1)}%)</div></div><div class="metric"><div class="m-label">Unrealized P/L</div><div class="m-val">${money(p.unrealized)}</div></div><div class="metric"><div class="m-label">Realized P/L</div><div class="m-val">${money(p.realized)}</div></div><div class="metric"><div class="m-label">CAGR / XIRR</div><div class="m-val">${p.cagr.toFixed(2)}% / ${p.xirr.toFixed(2)}%</div></div><div class="metric"><div class="m-label">Annual dividend</div><div class="m-val positive">${money(p.dividend)}</div></div><div class="metric"><div class="m-label">Yield / growth</div><div class="m-val">${p.dividendYield.toFixed(2)}% / ${money(p.dividendGrowth)}</div></div></div><div class="stat-row"><span class="stat-label">Monthly dividend</span><strong>${money(p.monthlyDividend)}</strong></div><div class="stat-row"><span class="stat-label">Cost basis</span><strong>${money(p.cost)}</strong></div><div style="margin-top:12px">${Object.entries(p.allocation).map(([type,value])=>{const current=pct(value,total),target=p.target[type]??0,diff=current-target;return `<div class="stat-row"><span>${type}</span><strong>${current.toFixed(1)}% · target ${target}% · <span class="${diff>0?"warning":"positive"}">${diff>=0?"+":""}${diff.toFixed(1)}%</span></strong></div>`;}).join("")||`<div class="empty">Belum ada alokasi.</div>`}</div><div class="small-muted" style="margin-top:12px">Rebalance: ${rebalance}<br>Sector: ${exposure("sector")}<br>Country: ${exposure("country")}<br>Currency: ${exposure("currency")}<br>Risk: ${exposure("risk")}</div>`;
   const dcaInitial=Number(document.getElementById("dcaInitial")?.value)||0,dcaMonthly=Number(document.getElementById("dcaMonthly")?.value)||0,dcaReturn=Number(document.getElementById("dcaReturn")?.value)||0;
   document.getElementById("dcaResults").innerHTML=[5,10,20,30].map(years=>`<div class="metric"><div class="m-label">${years} tahun</div><div class="m-val">${money(dcaValue(dcaInitial,dcaMonthly,dcaReturn,years))}</div></div>`).join("");
-  const plans=db.debts.map(d=>{const base=debtPlan(d),extra=debtPlan(d,1000000),payoff=new Date();payoff.setMonth(payoff.getMonth()+(base.months===Infinity?0:base.months));const schedule=amortizationSchedule(d).map(x=>`Bulan ${x.month}: interest ${money(x.interest)} · principal ${money(x.principal)} · balance ${money(x.balance)}`).join("<br>");return `<div class="stat-row"><div><div class="stat-label">${d.name}</div><div style="font-size:11px;color:var(--muted)">Bunga bulan ini ${money(base.firstInterest)} · principal ${money(base.firstPrincipal)} · total interest ${money(base.interest)} · payoff ${base.months===Infinity?"-":payoff.toLocaleDateString("id-ID")}</div><div class="small-muted">${schedule}</div></div><strong>+Rp1m: ${extra.months===Infinity?"-":extra.months+" bln"}</strong></div>`;}).join("");
+  const plans=db.debts.map(d=>{const base=debtPlan(d),extra=debtPlan(d,1000000),payoff=new Date();payoff.setMonth(payoff.getMonth()+(base.months===Infinity?0:base.months));const paid=debtPaid(d),progress=debtProgress(d),schedule=amortizationSchedule(d).map(x=>`Bulan ${x.month}: interest ${money(x.interest)} · principal ${money(x.principal)} · balance ${money(x.balance)}`).join("<br>");return `<div class="stat-row"><div><div class="stat-label">${d.name}</div><div class="small-muted">Terbayar ${money(paid)} · sisa pokok ${money(d.balance)} · ${progress.toFixed(0)}% lunas</div><div class="progress" style="margin-top:7px"><span style="width:${progress}%"></span></div><div class="small-muted" style="margin-top:9px">Estimasi lunas ${base.months===Infinity?"-":payoff.toLocaleDateString("id-ID")} · Bunga bulan ini ${money(base.firstInterest)} · total bunga simulasi ${money(base.interest)}</div><div class="small-muted" style="margin-top:8px">${schedule}</div><div class="small-muted" style="margin-top:10px">Checklist cicilan (${(d.payments||[]).filter(payment=>payment.installment).length}/${d.term} selesai)</div><div class="debt-checklist">${debtChecklist(d)}</div></div><strong>+Rp1m: ${extra.months===Infinity?"-":extra.months+" bln"}</strong></div>`;}).join("");
   const order=(mode)=>[...db.debts].sort((a,b)=>mode==="snowball"?a.balance-b.balance:a.rate-b.rate).map(d=>d.name).join(" → ");
   document.getElementById("debtIntelligence").innerHTML=plans+`<div class="stat-row"><span class="stat-label">Debt snowball</span><strong>${order("snowball")||"-"}</strong></div><div class="stat-row"><span class="stat-label">Debt avalanche</span><strong>${order("avalanche")||"-"}</strong></div>`;
   document.getElementById("goalSimulator").innerHTML=db.goals.map(g=>{const x=goalMetrics(g),status=x.shortfall?"Need +"+money(x.shortfall)+"/bln":"On track";return `<div class="stat-row"><div><div class="stat-label">${g.name} · ${status}</div><div style="font-size:11px;color:var(--muted)">Required ${money(x.required)}/bulan · current ${money(x.current)}/bulan · ${x.months} bulan</div></div><strong>${x.probability.toFixed(0)}%</strong></div>`;}).join("")||`<div class="empty">Belum ada goals.</div>`;
@@ -1208,7 +1248,7 @@ function renderDebts(){
   document.getElementById("debtTotal").textContent=money(total);
   document.getElementById("debtPayment").textContent=money(payment);
   document.getElementById("debtRate").textContent=rate.toFixed(2)+"%";
-  document.getElementById("debtTable").innerHTML=db.debts.length?`<table><thead><tr><th>Utang</th><th>Original</th><th>Outstanding</th><th>APR</th><th>Cicilan/bln</th><th>Progress</th><th></th></tr></thead><tbody>${db.debts.map(d=>{const p=Math.max(0,Math.min(100,pct(d.principal-d.balance,d.principal))); return `<tr><td><strong>${d.name}</strong></td><td>${money(d.principal)}</td><td class="negative"><strong>${money(d.balance)}</strong></td><td>${d.rate.toFixed(2)}%</td><td>${money(d.payment)}</td><td style="min-width:160px"><div class="progress"><span style="width:${p}%"></span></div><small>${p.toFixed(0)}% lunas</small></td><td><button class="btn btn-primary" style="padding:5px 8px" onclick="openModal('debtPayment',${d.id})">Bayar</button> <button class="btn btn-danger" style="padding:5px 8px" onclick="deleteDebt(${d.id})">Hapus</button></td></tr>`}).join("")}</tbody></table>`:`<div class="empty">Tidak ada utang.</div>`;
+  document.getElementById("debtTable").innerHTML=db.debts.length?`<table><thead><tr><th>Utang</th><th>Original</th><th>Outstanding</th><th>APR</th><th>Cicilan/bln</th><th>Progress</th><th></th></tr></thead><tbody>${db.debts.map(d=>{const p=Math.max(0,Math.min(100,pct(d.principal-d.balance,d.principal))); return `<tr><td><strong>${d.name}</strong></td><td>${money(d.principal)}</td><td class="negative"><strong>${money(d.balance)}</strong></td><td>${d.rate.toFixed(2)}%</td><td>${money(d.payment)}</td><td style="min-width:160px"><div class="progress"><span style="width:${p}%"></span></div><small>${p.toFixed(0)}% lunas</small></td><td><button class="btn btn-primary" style="padding:5px 8px" onclick="openModal('debtPayment',${d.id})">Bayar</button> <button class="btn" style="padding:5px 8px" onclick="openModal('debt',${d.id})">Edit</button> <button class="btn btn-danger" style="padding:5px 8px" onclick="deleteDebt(${d.id})">Hapus</button></td></tr>`}).join("")}</tbody></table>`:`<div class="empty">Tidak ada utang.</div>`;
 }
 
 function renderGoals(){
@@ -1337,14 +1377,16 @@ function openModal(type, id=null){
     </div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">Simpan</button></div></form>`;
   }
   if(type==="debt"){
-    title.textContent="Tambah Utang";
-    body.innerHTML=`<form onsubmit="submitDebt(event)"><div class="input-grid">
-      <label>Nama utang<input name="name" placeholder="Credit Card" required></label>
-      <label>Original principal<input name="principal" type="number" min="0" required></label>
-      <label>Outstanding balance<input name="balance" type="number" min="0" required></label>
-      <label>APR (%)<input name="rate" type="number" min="0" step="0.01" required></label>
-      <label>Cicilan / bulan<input name="payment" type="number" min="0" required></label>
-    </div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">Simpan</button></div></form>`;
+    const existing=id?db.debts.find(item=>item.id===id):null;
+    title.textContent=existing?"Edit Utang":"Tambah Utang";
+    body.innerHTML=`<form data-debt-id="${id||""}" onsubmit="submitDebt(event)"><div class="input-grid">
+      <label>Nama utang<input name="name" value="${existing?.name||""}" placeholder="Credit Card" required></label>
+      <label>Original principal<input name="principal" type="number" min="0" value="${existing?.principal||""}" required></label>
+      <label>Outstanding balance<input name="balance" type="number" min="0" value="${existing?.balance??""}" required></label>
+      <label>APR (%)<input name="rate" type="number" min="0" step="0.01" value="${existing?.rate??0}" required></label>
+      <label>Cicilan / bulan<input name="payment" type="number" min="0" value="${existing?.payment||""}" required></label>
+      <label>Tenor (bulan)<input name="term" type="number" min="1" value="${existing?.term||12}" required></label>
+    </div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">${existing?"Simpan perubahan":"Simpan"}</button></div></form>`;
   }
   if(type==="debtPayment"){
     const debt=db.debts.find(item=>item.id===id), accounts=(db.accounts||[]).map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
@@ -1444,18 +1486,17 @@ function submitInvestment(e){
 }
 function submitDebt(e){
   e.preventDefault(); const f=new FormData(e.target);
-  db.debts.push({id:Date.now(),name:f.get("name"),principal:Number(f.get("principal")),balance:Number(f.get("balance")),rate:Number(f.get("rate")),payment:Number(f.get("payment"))});
-  closeModal(); commit("Added debt","debt",null,db.debts.at(-1),"Utang berhasil ditambahkan");
+  const id=Number(e.target.dataset.debtId||0), existing=id?db.debts.find(item=>item.id===id):null;
+  const debt={id:id||Date.now(),name:f.get("name"),principal:Number(f.get("principal")),balance:Number(f.get("balance")),rate:Number(f.get("rate")),payment:Number(f.get("payment")),term:Number(f.get("term"))||12,payments:existing?.payments||[]};
+  const before=existing?clone(existing):null;
+  if(existing){Object.assign(existing,debt);}else db.debts.push(debt);
+  closeModal(); commit(existing?"Edited debt":"Added debt","debt",before,debt,existing?"Utang berhasil diperbarui":"Utang berhasil ditambahkan");
 }
 function submitDebtPayment(e,id){
   e.preventDefault(); const f=new FormData(e.target), debt=db.debts.find(item=>item.id===id);
   if(!debt)return;
-  const amount=Number(f.get("amount")), interest=Math.max(0,Number(f.get("interest")||0)), principal=Math.max(0,amount-interest);
-  if(!amount||principal<=0||principal>Number(debt.balance||0)){alert("Nominal pembayaran tidak valid untuk outstanding utang ini.");return;}
-  const before=clone(debt);
-  debt.balance=Math.max(0,Number(debt.balance)-principal);
-  db.transactions.push({id:Date.now(),date:f.get("date"),type:"expense",category:"Debt Payment",description:f.get("description")||`Pembayaran ${debt.name}`,amount,accountId:Number(f.get("accountId")),account:accountById(f.get("accountId"))?.name||"Account",cleared:true,debtId:id,debtPrincipal:principal,debtInterest:interest});
-  closeModal(); commit("Recorded debt payment","debt",before,debt,`Pembayaran ${debt.name} berhasil dicatat`);
+  const saved=recordDebtPayment(debt,{amount:Number(f.get("amount")),interest:Number(f.get("interest")||0),date:f.get("date"),accountId:Number(f.get("accountId"))});
+  if(saved)closeModal();
 }
 function submitGoal(e){
   e.preventDefault(); const f=new FormData(e.target);
