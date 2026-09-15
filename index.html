@@ -1208,7 +1208,7 @@ function renderDebts(){
   document.getElementById("debtTotal").textContent=money(total);
   document.getElementById("debtPayment").textContent=money(payment);
   document.getElementById("debtRate").textContent=rate.toFixed(2)+"%";
-  document.getElementById("debtTable").innerHTML=db.debts.length?`<table><thead><tr><th>Utang</th><th>Original</th><th>Outstanding</th><th>APR</th><th>Cicilan/bln</th><th>Progress</th><th></th></tr></thead><tbody>${db.debts.map(d=>{const p=Math.max(0,Math.min(100,pct(d.principal-d.balance,d.principal))); return `<tr><td><strong>${d.name}</strong></td><td>${money(d.principal)}</td><td class="negative"><strong>${money(d.balance)}</strong></td><td>${d.rate.toFixed(2)}%</td><td>${money(d.payment)}</td><td style="min-width:160px"><div class="progress"><span style="width:${p}%"></span></div><small>${p.toFixed(0)}% lunas</small></td><td><button class="btn btn-danger" style="padding:5px 8px" onclick="deleteDebt(${d.id})">Hapus</button></td></tr>`}).join("")}</tbody></table>`:`<div class="empty">Tidak ada utang.</div>`;
+  document.getElementById("debtTable").innerHTML=db.debts.length?`<table><thead><tr><th>Utang</th><th>Original</th><th>Outstanding</th><th>APR</th><th>Cicilan/bln</th><th>Progress</th><th></th></tr></thead><tbody>${db.debts.map(d=>{const p=Math.max(0,Math.min(100,pct(d.principal-d.balance,d.principal))); return `<tr><td><strong>${d.name}</strong></td><td>${money(d.principal)}</td><td class="negative"><strong>${money(d.balance)}</strong></td><td>${d.rate.toFixed(2)}%</td><td>${money(d.payment)}</td><td style="min-width:160px"><div class="progress"><span style="width:${p}%"></span></div><small>${p.toFixed(0)}% lunas</small></td><td><button class="btn btn-primary" style="padding:5px 8px" onclick="openModal('debtPayment',${d.id})">Bayar</button> <button class="btn btn-danger" style="padding:5px 8px" onclick="deleteDebt(${d.id})">Hapus</button></td></tr>`}).join("")}</tbody></table>`:`<div class="empty">Tidak ada utang.</div>`;
 }
 
 function renderGoals(){
@@ -1346,6 +1346,18 @@ function openModal(type, id=null){
       <label>Cicilan / bulan<input name="payment" type="number" min="0" required></label>
     </div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">Simpan</button></div></form>`;
   }
+  if(type==="debtPayment"){
+    const debt=db.debts.find(item=>item.id===id), accounts=(db.accounts||[]).map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
+    if(!debt){ closeModal(); return; }
+    title.textContent=`Bayar Utang: ${debt.name}`;
+    body.innerHTML=`<form onsubmit="submitDebtPayment(event,${id})"><div class="subtle" style="margin-bottom:12px">Outstanding saat ini: <strong>${money(debt.balance)}</strong></div><div class="input-grid">
+      <label>Tanggal<input name="date" type="date" value="${new Date().toISOString().slice(0,10)}" required></label>
+      <label>Total pembayaran<input name="amount" type="number" min="1" max="${debt.balance + debt.balance * debt.rate / 100 / 12}" required></label>
+      <label>Bunga<input name="interest" type="number" min="0" value="0"></label>
+      <label>Akun pembayaran<select name="accountId" required>${accounts}</select></label>
+      <label style="grid-column:1/-1">Catatan<input name="description" value="Pembayaran ${debt.name}"></label>
+    </div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">Simpan pembayaran</button></div></form>`;
+  }
 
   if(type==="account"){
     title.textContent="Tambah Rekening";
@@ -1434,6 +1446,16 @@ function submitDebt(e){
   e.preventDefault(); const f=new FormData(e.target);
   db.debts.push({id:Date.now(),name:f.get("name"),principal:Number(f.get("principal")),balance:Number(f.get("balance")),rate:Number(f.get("rate")),payment:Number(f.get("payment"))});
   closeModal(); commit("Added debt","debt",null,db.debts.at(-1),"Utang berhasil ditambahkan");
+}
+function submitDebtPayment(e,id){
+  e.preventDefault(); const f=new FormData(e.target), debt=db.debts.find(item=>item.id===id);
+  if(!debt)return;
+  const amount=Number(f.get("amount")), interest=Math.max(0,Number(f.get("interest")||0)), principal=Math.max(0,amount-interest);
+  if(!amount||principal<=0||principal>Number(debt.balance||0)){alert("Nominal pembayaran tidak valid untuk outstanding utang ini.");return;}
+  const before=clone(debt);
+  debt.balance=Math.max(0,Number(debt.balance)-principal);
+  db.transactions.push({id:Date.now(),date:f.get("date"),type:"expense",category:"Debt Payment",description:f.get("description")||`Pembayaran ${debt.name}`,amount,accountId:Number(f.get("accountId")),account:accountById(f.get("accountId"))?.name||"Account",cleared:true,debtId:id,debtPrincipal:principal,debtInterest:interest});
+  closeModal(); commit("Recorded debt payment","debt",before,debt,`Pembayaran ${debt.name} berhasil dicatat`);
 }
 function submitGoal(e){
   e.preventDefault(); const f=new FormData(e.target);
