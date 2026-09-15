@@ -906,13 +906,14 @@ function debtProgress(debt){
 }
 function recordDebtPayment(debt,{amount,interest=0,date,accountId,installment=null}){
   const total=Number(amount||0), monthlyInterest=Math.max(0,Number(interest||0)), principal=Math.max(0,total-monthlyInterest);
-  if(!total||principal<=0||principal>Number(debt.balance||0)){
+  if(!total||principal<=0){
     alert("Nominal pembayaran tidak valid untuk outstanding utang ini.");
     return false;
   }
+  const appliedPrincipal=Math.min(principal,Number(debt.balance||0));
   const before=clone(debt);
-  debt.balance=Math.max(0,Number(debt.balance)-principal);
-  debt.payments=(debt.payments||[]).concat({id:Date.now(),date:date||new Date().toISOString().slice(0,10),amount:total,principal,interest:monthlyInterest,installment});
+  debt.balance=Math.max(0,Number(debt.balance)-appliedPrincipal);
+  debt.payments=(debt.payments||[]).concat({id:Date.now(),date:date||new Date().toISOString().slice(0,10),amount:total,principal:appliedPrincipal,interest:monthlyInterest,overpayment:Math.max(0,principal-appliedPrincipal),installment});
   db.transactions.push({id:Date.now()+1,date:date||new Date().toISOString().slice(0,10),type:"expense",category:"Debt Payment",description:`Pembayaran ${debt.name}`,amount:total,accountId:Number(accountId),account:accountById(accountId)?.name||"Account",cleared:true,debtId:debt.id,debtPrincipal:principal,debtInterest:monthlyInterest});
   commit("Recorded debt payment","debt",before,debt,`Pembayaran ${debt.name} berhasil dicatat`);
   return true;
@@ -1384,9 +1385,11 @@ function openModal(type, id=null){
       <label>Original principal<input name="principal" type="number" min="0" value="${existing?.principal||""}" required></label>
       <label>Outstanding balance<input name="balance" type="number" min="0" value="${existing?.balance??""}" required></label>
       <label>APR (%)<input name="rate" type="number" min="0" step="0.01" value="${existing?.rate??0}" required></label>
-      <label>Cicilan / bulan<input name="payment" type="number" min="0" value="${existing?.payment||""}" required></label>
+      <label>Cicilan / bulan<input name="payment" type="number" min="0" value="${existing?.payment||""}" oninput="updateDebtTotal(this.form)" required></label>
       <label>Tenor (bulan)<input name="term" type="number" min="1" value="${existing?.term||12}" required></label>
-    </div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">${existing?"Simpan perubahan":"Simpan"}</button></div></form>`;
+      <label>Total rencana pembayaran<input name="plannedTotal" value="${money((existing?.payment||0)*(existing?.term||12))}" readonly></label>
+    </div><div class="subtle">Total rencana dihitung otomatis dari cicilan bulanan × tenor.</div><div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary">${existing?"Simpan perubahan":"Simpan"}</button></div></form>`;
+    body.querySelector('[name="term"]').addEventListener("input",()=>updateDebtTotal(body.querySelector("form")));
   }
   if(type==="debtPayment"){
     const debt=db.debts.find(item=>item.id===id), accounts=(db.accounts||[]).map(a=>`<option value="${a.id}">${a.name}</option>`).join("");
@@ -1394,7 +1397,7 @@ function openModal(type, id=null){
     title.textContent=`Bayar Utang: ${debt.name}`;
     body.innerHTML=`<form onsubmit="submitDebtPayment(event,${id})"><div class="subtle" style="margin-bottom:12px">Outstanding saat ini: <strong>${money(debt.balance)}</strong></div><div class="input-grid">
       <label>Tanggal<input name="date" type="date" value="${new Date().toISOString().slice(0,10)}" required></label>
-      <label>Total pembayaran<input name="amount" type="number" min="1" max="${debt.balance + debt.balance * debt.rate / 100 / 12}" required></label>
+      <label>Total pembayaran<input name="amount" type="number" min="1" required></label>
       <label>Bunga<input name="interest" type="number" min="0" value="0"></label>
       <label>Akun pembayaran<select name="accountId" required>${accounts}</select></label>
       <label style="grid-column:1/-1">Catatan<input name="description" value="Pembayaran ${debt.name}"></label>
@@ -1438,6 +1441,13 @@ function openModal(type, id=null){
   }
 }
 function closeModal(){ document.getElementById("modal").classList.remove("show"); }
+
+function updateDebtTotal(form){
+  const payment=Number(form.querySelector('[name="payment"]')?.value)||0;
+  const term=Number(form.querySelector('[name="term"]')?.value)||0;
+  const total=form.querySelector('[name="plannedTotal"]');
+  if(total)total.value=money(payment*term);
+}
 
 function toggleTransactionFields(select){
   const form=select.form;
